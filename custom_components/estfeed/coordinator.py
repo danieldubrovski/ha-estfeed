@@ -821,10 +821,15 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         rows = last_stats.get(stream.statistic_id)
         if not rows:
             return None
-        end_ms = rows[0].get("end")
-        if end_ms is None:
+        end = rows[0].get("end")
+        if end is None:
             return None
-        return datetime.fromtimestamp(end_ms / 1000.0, tz=UTC)
+        # The recorder returns UNIX timestamps in seconds (only the websocket
+        # API converts to milliseconds). Reading them as milliseconds put the
+        # resume point in January 1970, so every tick rewrote its whole
+        # 30-day window chained onto the latest sum: a jump the size of the
+        # window's total at the window start, on every tick.
+        return datetime.fromtimestamp(float(end), tz=UTC)
 
     async def _prior_sum_for_stream(self, stream: StatisticStream) -> float:
         last_stats = await get_instance(self.hass).async_add_executor_job(

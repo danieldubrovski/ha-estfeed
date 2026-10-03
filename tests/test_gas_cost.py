@@ -150,3 +150,41 @@ async def test_exchange_cost_skipped_when_price_source_fails(hass):
     )
     assert COST_ID not in stats
     assert coord.last_gas_price_error == "down"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_ticks_keep_sum_continuous(hass, monkeypatch):
+    """Regression: the recorder's ``end`` is in seconds. Read as milliseconds,
+    the resume point fell in 1970 and every tick rewrote its 30-day window
+    chained onto the latest sum, inserting a jump the size of that window."""
+    # The test recorder (HA 2025.1) predates the ``unit_class`` metadata key.
+    monkeypatch.setattr("custom_components.estfeed.statistics._UNIT_CLASS_BY_UNIT", {})
+    await _setup_recorder(hass)
+    now_hour = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    first = now_hour - timedelta(days=3)
+    intervals = [
+        AccountingInterval(first + timedelta(hours=h), 1.0, 0.0, 0.1, 0.0) for h in range(48)
+    ]
+    coord = _coordinator(hass, {})
+
+    async def tick(available: int):
+        coord._client.get_metering_data = AsyncMock(
+            return_value=[MeterData(eic=_gas_meter().eic, intervals=intervals[:available])]
+        )
+        await coord._fetch_meter_window(
+            _gas_meter(),
+            now_hour - timedelta(days=30),
+            now_hour,
+            write_stats=True,
+            force_start=False,
+        )
+        await async_wait_recording_done(hass)
+
+    await tick(24)
+    await tick(48)
+    sid = "estfeed:home_consumption_099g"
+    stats = await get_instance(hass).async_add_executor_job(
+        statistics_during_period, hass, first, now_hour, {sid}, "hour", None, {"sum"}
+    )
+    sums = [round(r["sum"], 3) for r in stats[sid]]
+    assert sums == [round(0.1 * (h + 1), 3) for h in range(48)]
