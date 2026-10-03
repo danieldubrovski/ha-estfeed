@@ -1723,7 +1723,8 @@ async def test_fetch_meter_window_writes_gas_cost_from_kwh_without_nps(hass):
             side_effect=_capture,
         ),
         patch.object(coord, "_latest_seen_for_stream", new=AsyncMock(return_value=None)),
-        patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=1.0)),
+        patch.object(coord, "_prior_sum_for_stream", new=AsyncMock(return_value=0.0)),
+        patch.object(coord, "_sum_before_window", new=AsyncMock(return_value=1.0)),
     ):
         await coord._fetch_meter_window(
             _gas_meter(), hour, hour + timedelta(hours=3), write_stats=True, force_start=False

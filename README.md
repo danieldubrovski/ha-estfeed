@@ -57,15 +57,25 @@ Changing VAT or margin in the integration options automatically rebuilds the cos
 
 #### Gas cost
 
-Gas has no spot-price source, so gas cost uses a flat price you set in the integration options: **Gas price (EUR/kWh excl. VAT)**. While it is `0` (the default) no gas cost is published. Once set, the integration publishes:
+Choose how gas is priced in the integration options under **Gas cost pricing**:
 
-- `estfeed:<your_name>_gas_cost_<eic_suffix>` — cumulative gas cost in EUR, `kWh × gas price × (1 + VAT%/100)` per hour
+- **Off** (default): no gas cost is published.
+- **Fixed price**: every hour costs `kWh × fixed price × (1 + VAT%/100)`. Set **Gas fixed price (EUR/kWh excl. VAT)**.
+- **Exchange price**: every hour costs `kWh × (exchange index + margin) × (1 + VAT%/100)`. The index is the daily GET Baltic / EEX gas price for the Finnish-Baltic zone, fetched from the public [Elering dashboard API](https://dashboard.elering.ee/api/gas-trade) with full history. Set **Gas margin over exchange price (EUR/kWh excl. VAT)** to what your seller adds on top of the index.
 
-Gas is priced per kWh (the unit Estonian gas contracts use) from Estfeed's hourly kWh values, even though the consumption statistic is in m³. The margin option applies to electricity only.
+Each gas day's index applies from 07:00 to 07:00 Estonian time. Entries configured with only a fixed price before the mode option existed keep working as **Fixed price**.
+
+The integration publishes:
+
+- `estfeed:<your_name>_gas_cost_<eic_suffix>`: cumulative gas cost in EUR
+
+Gas is priced per kWh (the unit Estonian gas contracts use) from Estfeed's hourly kWh values, even though the consumption statistic is in m³. The electricity margin option does not apply to gas. Network (delivery) fees are not included.
 
 In Settings → Energy → Gas consumption, edit the `estfeed:<your_name>_consumption_<eic_suffix>` source and under "Use an entity tracking the total costs" select `estfeed:<your_name>_gas_cost_<eic_suffix>`. HA's own "static price" and "entity with current price" options do not work for external statistics like this one: HA only computes those for sensor entities.
 
-Setting or changing the gas price (or VAT) rebuilds the gas cost history over the configured backfill window. The rebuild re-fetches the window from Estfeed, so with the 5-second rate limit a 12-month window takes about a minute.
+Elering publishes a gas day's final index about a day after Estfeed delivers that day's usage. Hours whose index is not published yet are written at zero cost, and every hourly update re-prices the last 7 days, so they are corrected automatically once the index appears.
+
+Changing the gas pricing mode, price, margin or VAT rebuilds the gas cost history over the configured backfill window. The rebuild re-fetches the window from Estfeed, so with the 5-second rate limit a 12-month window takes about a minute.
 
 ## Entities created
 

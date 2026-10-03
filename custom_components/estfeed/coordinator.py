@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -29,23 +29,29 @@ from .api import (
 )
 from .const import (
     CONF_BACKFILL_MONTHS,
+    CONF_GAS_MARGIN_EUR_PER_KWH,
     CONF_GAS_PRICE_EUR_PER_KWH,
+    CONF_GAS_PRICE_MODE,
     CONF_MARGIN_EUR_PER_KWH,
     CONF_RESOLUTION,
     CONF_VAT_PERCENT,
+    DEFAULT_GAS_MARGIN_EUR_PER_KWH,
     DEFAULT_GAS_PRICE_EUR_PER_KWH,
     DEFAULT_MARGIN_EUR_PER_KWH,
     DEFAULT_VAT_PERCENT,
     DOMAIN,
+    GAS_REPRICE_DAYS,
     MAX_DAYS_PER_REQUEST,
     ROLLING_CACHE_DAYS,
     UNIT_KWH,
     UPDATE_INTERVAL,
     CommodityType,
+    GasPriceMode,
     Kind,
     Resolution,
     unit_for,
 )
+from .gas_price import EleringGasPriceClient, GasPriceError
 from .nps import NPS_PRICE_SETTLE_HOURS, EleringNpsClient, NpsError
 from .pricing import make_tariff
 from .statistics import (
@@ -53,6 +59,7 @@ from .statistics import (
     StatisticStream,
     async_write_cost_statistics,
     async_write_cost_statistics_from_hourly,
+    async_write_gas_cost_statistics,
     async_write_meter_statistics,
     build_statistic_id,
     eic_suffix,
@@ -136,11 +143,19 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # ``attach_nps_client`` before any fetch happens.
         self._nps: EleringNpsClient | None = None
         self.last_nps_error: str | None = None
+        # Gas exchange price client (exchange gas price mode), wired the same
+        # way as the NPS client.
+        self._gas_price_client: EleringGasPriceClient | None = None
+        self.last_gas_price_error: str | None = None
 
     def attach_nps_client(self, nps: EleringNpsClient) -> None:
         """Inject the NPS price client. Called from setup_entry (production)
         or directly in tests with a mocked client."""
         self._nps = nps
+
+    def attach_gas_price_client(self, gas_prices: EleringGasPriceClient) -> None:
+        """Inject the gas exchange price client (setup_entry or tests)."""
+        self._gas_price_client = gas_prices
 
     def attach_store(self, store: Store[dict[str, Any]]) -> None:
         """Attach the HA storage helper used to persist cumulative baselines.
@@ -180,22 +195,40 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
 
     @property
     def gas_price(self) -> float:
-        """Flat gas price in EUR/kWh excl. VAT; 0 means gas cost is disabled."""
+        """Fixed gas price in EUR/kWh excl. VAT (fixed mode)."""
         return float(self.options.get(CONF_GAS_PRICE_EUR_PER_KWH, DEFAULT_GAS_PRICE_EUR_PER_KWH))
+
+    @property
+    def gas_margin(self) -> float:
+        """Margin over the gas exchange index in EUR/kWh excl. VAT (exchange mode)."""
+        return float(self.options.get(CONF_GAS_MARGIN_EUR_PER_KWH, DEFAULT_GAS_MARGIN_EUR_PER_KWH))
+
+    @property
+    def gas_price_mode(self) -> GasPriceMode:
+        """How gas cost is priced.
+
+        Entries saved before the mode option existed only had a fixed price:
+        treat a positive price as fixed mode so they keep working unchanged.
+        """
+        mode = self.options.get(CONF_GAS_PRICE_MODE)
+        if mode is not None:
+            return GasPriceMode(mode)
+        return GasPriceMode.FIXED if self.gas_price > 0 else GasPriceMode.OFF
 
     def cost_streams_for(self, meter: MeteringPoint) -> list[CostStream]:
         """Cost streams for one meter.
 
         Electricity gets cost + compensation priced at the NPS spot price; gas
-        gets a single cost stream priced at the flat ``gas_price`` (none when
-        the price is unset). The unit is always EUR: prices are EUR and no
+        gets a single cost stream priced at a fixed price or the exchange
+        index (none when gas pricing is off). The unit is always EUR: prices are EUR and no
         conversion is applied, so labelling the statistic with
         ``hass.config.currency`` would mislabel EUR amounts as e.g. USD for
         non-EUR installations.
         """
         suffix = eic_suffix(meter.eic)
         if meter.commodity_type == CommodityType.NATURAL_GAS:
-            if self.gas_price <= 0:
+            mode = self.gas_price_mode
+            if mode == GasPriceMode.OFF or (mode == GasPriceMode.FIXED and self.gas_price <= 0):
                 return []
             return [
                 CostStream(
@@ -227,18 +260,40 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         return make_tariff(vat, margin)
 
     def _tariff_for(self, meter: MeteringPoint) -> Callable[[float], float]:
-        """Tariff for a meter: gas adds VAT only; the margin is an electricity option."""
+        """Tariff for a meter.
+
+        Gas: ``(price + margin) * (1 + VAT)``: the exchange margin is quoted
+        excl. VAT, unlike the electricity margin which is added after VAT. In
+        fixed mode the margin is 0 (the fixed price already includes it).
+        """
         if meter.commodity_type == CommodityType.NATURAL_GAS:
             vat = float(self.options.get(CONF_VAT_PERCENT, DEFAULT_VAT_PERCENT))
-            return make_tariff(vat, 0.0)
+            margin = self.gas_margin if self.gas_price_mode == GasPriceMode.EXCHANGE else 0.0
+            return lambda price: (price + margin) * (1 + vat / 100)
         return self._build_tariff()
 
-    def _flat_gas_prices(self, intervals: list[AccountingInterval]) -> dict[datetime, float]:
-        """Hour → flat gas price map covering ``intervals``, shaped like NPS prices."""
-        return {
-            i.period_start.replace(minute=0, second=0, microsecond=0): self.gas_price
-            for i in intervals
-        }
+    async def _gas_prices(
+        self, start: datetime, end: datetime, hours: Iterable[datetime]
+    ) -> dict[datetime, float] | None:
+        """Hourly gas prices (EUR/kWh, excl. margin and VAT) for ``hours``.
+
+        Fixed mode maps every hour to the fixed price; exchange mode looks up
+        each hour's gas-day index for [start, end). Returns None when the
+        exchange price source is unavailable, so callers skip cost writes and
+        a later tick catches up.
+        """
+        if self.gas_price_mode == GasPriceMode.FIXED:
+            return {h.replace(minute=0, second=0, microsecond=0): self.gas_price for h in hours}
+        if self._gas_price_client is None:
+            return None
+        try:
+            prices = await self._gas_price_client.async_get_prices(start, end)
+        except GasPriceError as err:
+            self.last_gas_price_error = str(err)
+            _LOGGER.warning("Gas price fetch failed for %s..%s: %s", start, end, err)
+            return None
+        self.last_gas_price_error = None
+        return prices
 
     def streams_for(self, meter: MeteringPoint) -> list[StatisticStream]:
         suffix = eic_suffix(meter.eic)
@@ -377,7 +432,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                 )
 
     async def _rebuild_gas_cost(self) -> None:
-        """Recompute gas cost at the flat ``gas_price`` over the configured window.
+        """Recompute gas cost (fixed or exchange price) over the configured window.
 
         Unlike electricity, this re-fetches from Estfeed rather than pricing
         the stored statistic: the stored gas series is in m³ while gas is
@@ -396,17 +451,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             hourly_kwh = await self._hourly_kwh_from_api(meter, start, end)
             if hourly_kwh is None:
                 continue
-            prices = dict.fromkeys(hourly_kwh, self.gas_price)
-            for cstream in cost_streams:
-                prior_sum = await self._sum_before_window(cstream.statistic_id, start, end)
-                await async_write_cost_statistics_from_hourly(
-                    self.hass,
-                    cstream,
-                    hourly_kwh,
-                    prices,
-                    self._tariff_for(meter),
-                    prior_sum=prior_sum,
-                )
+            await self._write_gas_cost(meter, cost_streams, hourly_kwh, start, end)
 
     async def _hourly_kwh_from_api(
         self, meter: MeteringPoint, start: datetime, end: datetime
@@ -597,18 +642,30 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                     if force_start
                     else await self._prior_sum_for_stream(stream)
                 )
-        # Per-cost-stream resume points and prior sums. Electricity cost
-        # needs NPS spot prices; gas is priced at a flat rate. Skip the reads
-        # entirely when electricity has no NPS client attached — cost writes
-        # are gated on ``has_prices`` below, so the reads would produce no
-        # observable effect and pay an extra recorder round-trip per stream
-        # per fetch.
+        # Gas cost is re-priced over a trailing window after the chunk loop
+        # (see _gas_reprice_start); only electricity spot cost is written per
+        # chunk. The gas window must be fetched too, so it can pull
+        # fetch_start back.
         is_gas = meter.commodity_type == CommodityType.NATURAL_GAS
-        has_prices = is_gas or self._nps is not None
+        spot_cost_streams = [] if is_gas else cost_streams
+        gas_cost_streams = cost_streams if is_gas else []
+        gas_reprice_start: datetime | None = None
+        gas_hourly_kwh: dict[datetime, float] = {}
+        gas_complete = True
+        if write_stats and gas_cost_streams:
+            gas_reprice_start = (
+                start if force_start else await self._gas_reprice_start(gas_cost_streams, start)
+            )
+            fetch_start = min(fetch_start, gas_reprice_start)
+        # Per-cost-stream resume points and prior sums for electricity. Skip
+        # the reads entirely when no NPS client is attached — cost writes are
+        # gated on ``self._nps is not None`` below, so the reads would produce
+        # no observable effect and pay an extra recorder round-trip per stream
+        # per fetch.
         cost_per_stream_start: dict[str, datetime | None] = {}
         cost_prior_sums: dict[str, float] = {}
-        if write_stats and cost_streams and has_prices:
-            for cstream in cost_streams:
+        if write_stats and spot_cost_streams and self._nps is not None:
+            for cstream in spot_cost_streams:
                 # Reuse _latest_seen_for_stream/_prior_sum_for_stream by passing
                 # a StatisticStream-shaped shim — both methods only need
                 # ``statistic_id``.
@@ -626,7 +683,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                     if force_start
                     else await self._prior_sum_for_stream(fake)
                 )
-        tariff = self._tariff_for(meter) if cost_streams else None
+        tariff = self._build_tariff() if spot_cost_streams else None
         cursor = fetch_start
         while cursor < end:
             chunk_end = min(cursor + timedelta(days=MAX_DAYS_PER_REQUEST), end)
@@ -635,9 +692,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
             )
             # Fetch prices for this chunk once if any cost stream needs them.
             prices: dict[datetime, float] | None = None
-            if write_stats and cost_streams and is_gas:
-                prices = self._flat_gas_prices([i for md in results for i in md.intervals])
-            elif write_stats and cost_streams and self._nps is not None:
+            if write_stats and spot_cost_streams and self._nps is not None:
                 # Evict hours whose NPS quarters may still be settling so
                 # they are re-fetched with complete data — without this, an
                 # hour first priced mid-settlement keeps its partial-quarter
@@ -655,6 +710,7 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                     prices = None
             for md in results:
                 if md.error is not None:
+                    gas_complete = False
                     self.last_meter_errors[md.eic] = md.error.code
                     _LOGGER.warning(
                         "Estfeed returned error for meter %s: %s (traceId=%s)",
@@ -684,9 +740,16 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                             prior_sum=prior_sums[stream.statistic_id],
                         )
                     self._update_cache(meter.eic, stream.kind, relevant)
-                # Cost streams (spot-priced electricity or flat-priced gas)
-                if write_stats and cost_streams and prices is not None and tariff is not None:
-                    for cstream in cost_streams:
+                if gas_reprice_start is not None:
+                    for ival in md.intervals:
+                        kwh = interval_value(ival, Kind.CONSUMPTION, UNIT_KWH)
+                        if kwh is None or ival.period_start < gas_reprice_start:
+                            continue
+                        hour = ival.period_start.replace(minute=0, second=0, microsecond=0)
+                        gas_hourly_kwh[hour] = gas_hourly_kwh.get(hour, 0.0) + float(kwh)
+                # Electricity spot cost streams
+                if write_stats and spot_cost_streams and prices is not None and tariff is not None:
+                    for cstream in spot_cost_streams:
                         threshold = cost_per_stream_start[cstream.statistic_id]
                         relevant_c = (
                             md.intervals
@@ -702,6 +765,52 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
                             prior_sum=cost_prior_sums[cstream.statistic_id],
                         )
             cursor = chunk_end
+        # A partially fetched window would rewrite the trailing cost rows
+        # without some hours; leave them for the next tick instead.
+        if gas_reprice_start is not None and gas_complete:
+            await self._write_gas_cost(
+                meter, gas_cost_streams, gas_hourly_kwh, gas_reprice_start, end
+            )
+
+    async def _gas_reprice_start(self, cost_streams: list[CostStream], start: datetime) -> datetime:
+        """Start of the trailing window whose gas cost a regular tick rewrites.
+
+        The gas exchange index for a gas day is published around a day after
+        Estfeed delivers that day's usage, so recent hours are first written
+        as zero-cost placeholders and must be re-priced later. Each tick
+        rewrites the last GAS_REPRICE_DAYS, or from the oldest cost stream's
+        last row if it lags further (e.g. after a price-source outage),
+        bounded by the tick's own ``start``.
+        """
+        now_hour = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+        reprice = now_hour - timedelta(days=GAS_REPRICE_DAYS)
+        for cstream in cost_streams:
+            latest = await self._latest_seen_for_stream(
+                StatisticStream(cstream.statistic_id, cstream.name, cstream.unit, cstream.kind)
+            )
+            if latest is None:
+                return start
+            reprice = min(reprice, latest)
+        return max(start, reprice)
+
+    async def _write_gas_cost(
+        self,
+        meter: MeteringPoint,
+        cost_streams: list[CostStream],
+        hourly_kwh: dict[datetime, float],
+        start: datetime,
+        end: datetime,
+    ) -> None:
+        """(Re)write gas cost rows for [start, end), chained onto the sum before ``start``."""
+        prices = await self._gas_prices(start, end, hourly_kwh)
+        if prices is None:
+            return
+        tariff = self._tariff_for(meter)
+        for cstream in cost_streams:
+            prior_sum = await self._sum_before_window(cstream.statistic_id, start, end)
+            await async_write_gas_cost_statistics(
+                self.hass, cstream, hourly_kwh, prices, tariff, prior_sum=prior_sum
+            )
 
     async def _latest_seen_for_stream(self, stream: StatisticStream) -> datetime | None:
         # `get_last_statistics` is a synchronous DB query; HA expects callers to

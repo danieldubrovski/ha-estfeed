@@ -21,7 +21,9 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_FRIENDLY_NAME,
+    CONF_GAS_MARGIN_EUR_PER_KWH,
     CONF_GAS_PRICE_EUR_PER_KWH,
+    CONF_GAS_PRICE_MODE,
     CONF_MARGIN_EUR_PER_KWH,
     CONF_VAT_PERCENT,
     DOMAIN,
@@ -29,6 +31,7 @@ from .const import (
     MIN_BACKFILL_MONTHS,
 )
 from .coordinator import EstfeedCoordinator
+from .gas_price import EleringGasPriceClient
 from .nps import EleringNpsClient
 from .utils import slugify
 
@@ -83,6 +86,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     coordinator.meters = meters
     coordinator.attach_nps_client(EleringNpsClient(session))
+    coordinator.attach_gas_price_client(EleringGasPriceClient(session))
     coordinator.attach_store(Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.baselines"))
     await coordinator.async_load_baselines()
 
@@ -150,7 +154,13 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     new_options = {**entry.data, **entry.options}
     coordinator.options = new_options
 
-    tariff_keys = (CONF_VAT_PERCENT, CONF_MARGIN_EUR_PER_KWH, CONF_GAS_PRICE_EUR_PER_KWH)
+    tariff_keys = (
+        CONF_VAT_PERCENT,
+        CONF_MARGIN_EUR_PER_KWH,
+        CONF_GAS_PRICE_MODE,
+        CONF_GAS_PRICE_EUR_PER_KWH,
+        CONF_GAS_MARGIN_EUR_PER_KWH,
+    )
     if any(old_options.get(key) != new_options.get(key) for key in tariff_keys):
         hass.async_create_background_task(
             coordinator.async_rebuild_cost(), name=f"{DOMAIN}_cost_rebuild"

@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 
 from .api import AccountingInterval, interval_value
 from .const import DOMAIN, UNIT_KWH, UNIT_M3, Kind
-from .pricing import compute_cost_rows, compute_cost_rows_from_hourly
+from .pricing import compute_cost_rows, compute_cost_rows_from_hourly, compute_gas_cost_rows
 
 # HA 2026.11 will require `mean_type` in StatisticMetaData; older HA versions
 # don't expose StatisticMeanType. Detect at import time and only set the field
@@ -212,4 +212,17 @@ async def async_write_cost_statistics_from_hourly(
     even when Estfeed revises recent intervals between fetches.
     """
     rows = compute_cost_rows_from_hourly(hourly_energy, prices, tariff, prior_sum=prior_sum)
+    return _publish_cost_rows(hass, stream, rows, prior_sum)
+
+
+async def async_write_gas_cost_statistics(
+    hass: HomeAssistant,
+    stream: CostStream,
+    hourly_kwh: dict[datetime, float],
+    prices: dict[datetime, float],
+    tariff: Callable[[float], float],
+    prior_sum: float,
+) -> float:
+    """Publish gas cost rows for every consumption hour (see compute_gas_cost_rows)."""
+    rows = compute_gas_cost_rows(hourly_kwh, prices, tariff, prior_sum=prior_sum)
     return _publish_cost_rows(hass, stream, rows, prior_sum)
