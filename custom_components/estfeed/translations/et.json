@@ -35,7 +35,8 @@
           "resolution": "Andmete täpsus",
           "backfill_months": "Ajalooliste andmete aken (kuud)",
           "vat_percent": "Käibemaks (%)",
-          "margin_eur_per_kwh": "Marginaal (EUR/kWh, võib olla negatiivne)"
+          "margin_eur_per_kwh": "Marginaal (EUR/kWh, võib olla negatiivne)",
+          "gas_price_eur_per_kwh": "Gaasi hind (EUR/kWh ilma käibemaksuta, 0 = gaasi kulu ei arvestata)"
         }
       }
     }

@@ -23,6 +23,9 @@ CONF_VAT_PERCENT: Final = "vat_percent"
 CONF_MARGIN_EUR_PER_KWH: Final = "margin_eur_per_kwh"
 DEFAULT_VAT_PERCENT: Final = 22.0
 DEFAULT_MARGIN_EUR_PER_KWH: Final = 0.0
+# Flat gas price (EUR/kWh, excl. VAT). 0 disables the gas cost statistic.
+CONF_GAS_PRICE_EUR_PER_KWH: Final = "gas_price_eur_per_kwh"
+DEFAULT_GAS_PRICE_EUR_PER_KWH: Final = 0.0
 
 UPDATE_INTERVAL: Final = timedelta(hours=1)
 ROLLING_CACHE_DAYS: Final = 62
@@ -62,3 +65,12 @@ class CommodityType(StrEnum):
 
     ELECTRICITY = "ELECTRICITY"
     NATURAL_GAS = "NATURAL_GAS"
+
+
+UNIT_KWH: Final = "kWh"
+UNIT_M3: Final = "m³"
+
+
+def unit_for(commodity: CommodityType) -> str:
+    """Unit published for a commodity: kWh for electricity, m³ for gas."""
+    return UNIT_KWH if commodity == CommodityType.ELECTRICITY else UNIT_M3

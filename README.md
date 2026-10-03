@@ -30,6 +30,12 @@ You'll need a `client_id` and `client_secret` from your e-Elering customer porta
 
 After setup completes (and the backfill finishes — usually within 1–2 minutes), open Settings → Energy → Electricity grid → "Add consumption" and pick `estfeed:<your_name>_consumption_<eic_suffix>`. If you have solar, add the matching `_production_` stream as "Return to grid".
 
+### Gas
+
+Estfeed publishes gas hourly data once a day, as a batch for the previous gas day (07:00–07:00 local time). The external statistic places every hour of that batch at its own timestamp once it arrives, so the Energy dashboard shows real hourly gas usage with a one-day lag.
+
+Open Settings → Energy → Gas consumption → "Add gas source" and pick `estfeed:<your_name>_consumption_<eic_suffix>` (unit m³).
+
 The integration writes external statistics with proper cumulative-sum semantics and a `last_reset` attribute on the cumulative-since-reset sensor, so HA's Energy dashboard handles resets without flagging them as counter rollbacks.
 
 ### Cost & compensation statistics
@@ -49,7 +55,17 @@ To wire them into the Energy dashboard:
 
 Changing VAT or margin in the integration options automatically rebuilds the cost/compensation history over the configured backfill window, so the dashboard reflects the new tariff retroactively.
 
-Gas meters do not publish cost statistics (no spot-price source).
+#### Gas cost
+
+Gas has no spot-price source, so gas cost uses a flat price you set in the integration options: **Gas price (EUR/kWh excl. VAT)**. While it is `0` (the default) no gas cost is published. Once set, the integration publishes:
+
+- `estfeed:<your_name>_gas_cost_<eic_suffix>` — cumulative gas cost in EUR, `kWh × gas price × (1 + VAT%/100)` per hour
+
+Gas is priced per kWh (the unit Estonian gas contracts use) from Estfeed's hourly kWh values, even though the consumption statistic is in m³. The margin option applies to electricity only.
+
+In Settings → Energy → Gas consumption, edit the `estfeed:<your_name>_consumption_<eic_suffix>` source and under "Use an entity tracking the total costs" select `estfeed:<your_name>_gas_cost_<eic_suffix>`. HA's own "static price" and "entity with current price" options do not work for external statistics like this one: HA only computes those for sensor entities.
+
+Setting or changing the gas price (or VAT) rebuilds the gas cost history over the configured backfill window. The rebuild re-fetches the window from Estfeed, so with the 5-second rate limit a 12-month window takes about a minute.
 
 ## Entities created
 

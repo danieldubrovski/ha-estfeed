@@ -35,7 +35,8 @@
           "resolution": "Data resolution",
           "backfill_months": "Backfill window (months)",
           "vat_percent": "VAT percentage (%)",
-          "margin_eur_per_kwh": "Margin (EUR/kWh, can be negative)"
+          "margin_eur_per_kwh": "Margin (EUR/kWh, can be negative)",
+          "gas_price_eur_per_kwh": "Gas price (EUR/kWh excl. VAT, 0 = no gas cost)"
         }
       }
     }

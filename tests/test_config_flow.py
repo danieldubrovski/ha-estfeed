@@ -243,11 +243,13 @@ async def test_options_flow_persists_vat_and_margin(hass):
         "backfill_months": 12,
         CONF_VAT_PERCENT: 24.0,
         CONF_MARGIN_EUR_PER_KWH: 0.015,
+        "gas_price_eur_per_kwh": 0.055,
     }
     result = await hass.config_entries.options.async_configure(result["flow_id"], submission)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_VAT_PERCENT] == 24.0
     assert entry.options[CONF_MARGIN_EUR_PER_KWH] == 0.015
+    assert entry.options["gas_price_eur_per_kwh"] == 0.055
 
 
 @pytest.mark.asyncio
@@ -269,3 +271,5 @@ async def test_options_flow_defaults_to_22_percent_vat_and_zero_margin(hass):
     }
     assert rendered[CONF_VAT_PERCENT] == DEFAULT_VAT_PERCENT
     assert rendered[CONF_MARGIN_EUR_PER_KWH] == DEFAULT_MARGIN_EUR_PER_KWH
+    # Gas cost is opt-in: 0 means no gas cost statistic.
+    assert rendered["gas_price_eur_per_kwh"] == 0.0
