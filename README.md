@@ -1,96 +1,86 @@
-# Estfeed — Home Assistant Integration
+# Estfeed for Home Assistant
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?logo=homeassistant&logoColor=white)](https://github.com/hacs/integration)
-[![Validate](https://img.shields.io/github/actions/workflow/status/tehisain/ha-estfeed/validate.yml?branch=main&label=validate&logo=github)](https://github.com/tehisain/ha-estfeed/actions/workflows/validate.yml)
-[![License: MIT](https://img.shields.io/github/license/tehisain/ha-estfeed?color=blue)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/tehisain/ha-estfeed?color=blueviolet)](https://github.com/tehisain/ha-estfeed/commits/main)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg?logo=ruff)](https://github.com/astral-sh/ruff)
+[![Validate](https://img.shields.io/github/actions/workflow/status/tehisain/ha-estfeed/validate.yml?branch=main&label=validate)](https://github.com/tehisain/ha-estfeed/actions/workflows/validate.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Home Assistant integration for Elering's [Estfeed](https://estfeed.elering.ee/) metering data API. Brings Estonian electricity (and gas) meter data into the **Energy Dashboard** with full historical backfill, plus lagging summary sensors for cards and automations.
+Imports [Elering Estfeed](https://estfeed.elering.ee/) meter data into Home Assistant's Energy dashboard, with daily, monthly and cumulative sensors.
 
-> **Note:** Estfeed publishes intervals throughout the day, but each hour goes through a settling period before the kWh value is finalised — the integration polls hourly and replaces unsettled placeholders with real values once the grid operator confirms them. Most hours land within a few hours of midnight that closed them; some may take longer. Expect today's running total to grow in chunks rather than minute-by-minute, and don't treat it as real-time.
+Polls hourly. Meter readings can arrive late; this is not a real-time power monitor.
 
 ## Installation
 
-### HACS (recommended)
+Requires Home Assistant 2024.12 or later.
 
-1. Add this repository as a custom HACS repository (category: Integration).
-2. Install "Estfeed" from HACS.
-3. Restart Home Assistant.
-4. Settings → Devices & Services → "+ Add Integration" → search "Estfeed".
+1. In HACS, open **Custom repositories** and add [this repository](https://github.com/tehisain/ha-estfeed) with type **Integration**. See the [HACS instructions](https://www.hacs.dev/docs/faq/custom_repositories/).
+2. Install **Estfeed** and restart Home Assistant.
+3. Open **Settings → Devices & services → Add integration** and search for **Estfeed**.
+4. Enter the `client_id` and `client_secret` from an API key created in the [Estfeed customer portal](https://estfeed.elering.ee/), plus a name for this installation.
 
-## Configuration
+For manual installation, copy `custom_components/estfeed` into your Home Assistant `config/custom_components` directory, restart, then follow steps 3–4.
 
-You'll need a `client_id` and `client_secret` from your e-Elering customer portal:
-1. Log in to https://kliendiportaal.elering.ee
-2. Generate an API key. The portal shows you the `client_id` (UUID) and `client_secret`.
-3. Paste both into the Estfeed integration setup form.
+## Energy dashboard
 
-## Energy Dashboard wiring
+Setup imports 12 months of history in the background. Options allow 1–84 months of 30 days each. Import time depends on the meters and available data.
 
-After setup completes (and the backfill finishes — usually within 1–2 minutes), open Settings → Energy → Electricity grid → "Add consumption" and pick `estfeed:<your_name>_consumption_<eic_suffix>`. If you have solar, add the matching `_production_` stream as "Return to grid".
+Select these external statistics in the Energy dashboard's grid settings. `<name>` is the installation name in lowercase with underscores; `<suffix>` is the meter EIC's last four alphanumeric characters, in lowercase.
 
-The integration writes external statistics with proper cumulative-sum semantics and a `last_reset` attribute on the cumulative-since-reset sensor, so HA's Energy dashboard handles resets without flagging them as counter rollbacks.
+| Grid setting | Energy statistic | Optional cost statistic |
+| --- | --- | --- |
+| Consumption | `estfeed:<name>_consumption_<suffix>` | `estfeed:<name>_cost_<suffix>` |
+| Return to grid | `estfeed:<name>_production_<suffix>` | `estfeed:<name>_compensation_<suffix>` |
 
-### Cost & compensation statistics
+For costs, choose **Use an entity tracking the total costs** and select the matching statistic. For gas, select the consumption statistic under **Gas consumption**. Gas uses m³ and has no derived costs.
 
-For electricity meters, the integration also publishes two derived external statistics in EUR:
+Electricity costs and production compensation use the EE Nord Pool prices from [Elering](https://dashboard.elering.ee/). Quarter-hour prices are averaged per hour, then multiplied by hourly energy using this tariff:
 
-- `estfeed:<your_name>_cost_<eic_suffix>` — cumulative cost of consumed energy
-- `estfeed:<your_name>_compensation_<eic_suffix>` — cumulative compensation for produced energy
+```text
+EUR/kWh = spot × (1 + VAT / 100) + margin
+```
 
-Both are computed by multiplying each hour's consumption/production by the matching Nord Pool spot price for the EE bidding zone (fetched from the Elering NPS API), then applying a configurable tariff: `spot × (1 + VAT%/100) + margin`. Defaults: VAT 22 %, margin 0 €/kWh — adjust in the integration options. Prices are denominated in **EUR** (the NPS API's native currency); the statistics are labelled EUR regardless of your Home Assistant currency setting.
+Set VAT and margin in the integration options. The integration defaults to **22% VAT** and **0 EUR/kWh margin**; Estonia's [standard VAT rate is 24% from 1 July 2025](https://www.emta.ee/en/admin/content/handbook_article/39). Check these settings against your contract. One tariff applies to consumption, production and all imported history. Changing it rebuilds the configured window's costs.
 
-To wire them into the Energy dashboard:
+These EUR estimates exclude network fees, levies and time-dependent tariffs, and approximate quarter-hour pricing. Use the dashboard's own price configuration if needed.
 
-1. Open Settings → Dashboards → Energy → "Grid consumption" for the existing `estfeed:<your_name>_consumption_<eic_suffix>` row.
-2. Under "Use an entity tracking the total costs", select `estfeed:<your_name>_cost_<eic_suffix>`.
-3. Repeat for "Return to grid" → pair `estfeed:<your_name>_production_<eic_suffix>` with `estfeed:<your_name>_compensation_<eic_suffix>`.
+## Entities
 
-Changing VAT or margin in the integration options automatically rebuilds the cost/compensation history over the configured backfill window, so the dashboard reflects the new tariff retroactively.
+Each meter gets:
 
-Gas meters do not publish cost statistics (no spot-price source).
+- Consumption totals for today, yesterday, month to date and the previous month.
+- Cumulative consumption since setup or the last reset, and a reset button.
+- Matching production sensors and a reset button, disabled by default.
+- A latest-interval timestamp and a data-fresh binary sensor (on when the newest cached interval is less than 30 hours old).
 
-## Entities created
+Periods follow Home Assistant's time zone. Find entity IDs under **Settings → Devices & services → Estfeed**; names vary with the installation, meter and language.
 
-For each metering point:
-- `sensor.<name>_consumption_today` (kWh — running total for the current local day; grows as new hourly intervals settle)
-- `sensor.<name>_consumption_yesterday` (kWh)
-- `sensor.<name>_consumption_month_to_date` (kWh)
-- `sensor.<name>_consumption_previous_month` (kWh)
-- `sensor.<name>_consumption_cumulative` (kWh — total since the last reset; baseline is captured at install so the sensor starts at 0 and counts forward)
-- `sensor.<name>_production_today` / `_yesterday` / `_month_to_date` / `_previous_month` / `_cumulative` (kWh, **disabled by default** — enable in entity registry if you generate)
-- `sensor.<name>_latest_interval` (timestamp, diagnostic)
-- `binary_sensor.<name>_data_fresh` (diagnostic — `on` if newest interval is < 30 h old)
-- `button.<name>_consumption_cumulative_reset` (re-captures the current cumulative as the new baseline, so the cumulative sensor returns to 0; the matching production button exists too and is disabled by default)
+Cumulative baselines survive restarts. Totals use a 62-day cache plus saved contributions from older intervals. Outages longer than 62 days can leave gaps in the cumulative sensor. Moving a reset timestamp only recounts cached intervals and clears saved older contributions.
 
-## Services
+## Actions
 
-- `estfeed.backfill_history(months=24, entry_id=<uuid>)` — re-fetch and re-publish the last N months of statistics. Rebuilds chain onto the cumulative sum at the window start, so history outside the window stays consistent.
-- `estfeed.set_cumulative_reset_at(reset_at=..., entry_id=<uuid>)` — move the cumulative-since-reset baseline to a specific timestamp (e.g. to restore a previous anchor after an accidental reset). Restores both consumption and production baselines.
+Run these from **Developer tools → Actions**:
 
-## Limitations
+| Action | Fields | Effect |
+| --- | --- | --- |
+| `estfeed.backfill_history` | `months` (1–84, default 24), optional `entry_id` | Fetch and replace energy and cost statistics for the requested window. |
+| `estfeed.set_cumulative_reset_at` | `reset_at`, optional `entry_id` | Set the cumulative baseline for consumption and production on all meters in the entry. |
 
-- Not real-time: hours need to settle before their kWh value is final (see the note at the top).
-- Cost/compensation statistics are a spot-price estimate (`spot × (1 + VAT%) + margin`); network fees, renewable levies and time-windowed margins are not modelled. For anything fancier, unpair the cost statistic and use HA's built-in Energy cost configuration instead.
-- Cost statistics are denominated in EUR (NPS prices are EUR; no conversion is applied).
-- The cumulative-since-reset sensor recomputes from a 62-day rolling cache plus a frozen sum; if Home Assistant is offline for more than ~62 days, consumption from the outage window beyond those 62 days is not recovered into the cumulative total.
-- API rate limit: 1 request per 5 seconds (per API key) — handled internally.
+Omitting `entry_id` targets every loaded Estfeed entry. A reset timestamp without a time-zone offset uses Home Assistant's time zone.
 
 ## Development
 
-The `editable_mode=compat` flag avoids a setuptools/HA loader incompatibility where the default editable install creates a virtual path entry that HA's `async_get_custom_components` cannot iterate.
+Use Python 3.12 or later in a virtual environment:
 
-~~~bash
-pip install -e . --config-settings editable_mode=compat
-pip install pytest pytest-asyncio pytest-cov pytest-homeassistant-custom-component homeassistant aioresponses freezegun ruff mypy
-pytest tests --cov=custom_components/estfeed
-ruff check custom_components tests
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]' --config-settings editable_mode=compat
+ruff check custom_components tests scripts
+ruff format --check custom_components tests scripts
 mypy
-~~~
+pytest tests --cov=custom_components/estfeed --cov-fail-under=85
+```
 
-For a live end-to-end check against your own API key:
+The compatibility flag lets Home Assistant discover the package during tests. To check the live API with your own credentials:
 
-~~~bash
-ESTFEED_CLIENT_ID=... ESTFEED_CLIENT_SECRET=... python scripts/smoke.py
-~~~
+```bash
+ESTFEED_CLIENT_ID=... ESTFEED_CLIENT_SECRET=... python -m scripts.smoke
+```
