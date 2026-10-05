@@ -582,8 +582,12 @@ class EstfeedCoordinator(DataUpdateCoordinator[None]):
         # we send a non-aligned timestamp, the API returns intervals at the
         # same minute/second offset, which HA's recorder rejects. Snap to the
         # resolution boundary so the API returns clean top-of-hour buckets.
-        start = _snap_to_resolution(start, self.resolution)
-        end = _snap_to_resolution(end, self.resolution)
+        # Recorder rows cover whole hours. Publishing an incomplete hour at
+        # quarter-hour resolution would advance the resume point past its
+        # remaining quarters and permanently undercount that hour.
+        boundary = Resolution.HOUR if write_stats else self.resolution
+        start = _snap_to_resolution(start, boundary)
+        end = _snap_to_resolution(end, boundary)
         for meter in self.meters:
             await self._fetch_meter_window(
                 meter, start, end, write_stats=write_stats, force_start=force_start

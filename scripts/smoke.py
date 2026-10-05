@@ -2,6 +2,7 @@
 
 Usage: ESTFEED_CLIENT_ID=... ESTFEED_CLIENT_SECRET=... python scripts/smoke.py
 """
+
 from __future__ import annotations
 
 import asyncio

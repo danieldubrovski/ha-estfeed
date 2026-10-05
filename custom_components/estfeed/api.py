@@ -251,7 +251,12 @@ class EstfeedClient:
         payload = await self._request_json(
             "GET", "/api/public/v1/metering-point-eics", params=params
         )
-        return [MeteringPoint.from_dict(item) for item in payload]
+        if not isinstance(payload, list):
+            raise EstfeedAPIError("Invalid metering-point response")
+        try:
+            return [MeteringPoint.from_dict(item) for item in payload]
+        except (KeyError, TypeError, ValueError, AttributeError) as err:
+            raise EstfeedAPIError("Invalid metering-point response") from err
 
     async def get_metering_data(
         self,
@@ -271,7 +276,12 @@ class EstfeedClient:
         if eic_list:
             params["meteringPointEics"] = ",".join(eic_list)
         payload = await self._request_json("GET", "/api/public/v1/metering-data", params=params)
-        return [MeterData.from_dict(item) for item in payload]
+        if not isinstance(payload, list):
+            raise EstfeedAPIError("Invalid metering-data response")
+        try:
+            return [MeterData.from_dict(item) for item in payload]
+        except (KeyError, TypeError, ValueError, AttributeError) as err:
+            raise EstfeedAPIError("Invalid metering-data response") from err
 
     async def _fetch_token(self, now_monotonic: float) -> tuple[str, float]:
         data = {
@@ -284,12 +294,21 @@ class EstfeedClient:
             data=data,
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
         ) as resp:
-            payload = await resp.json()
-            if resp.status != 200 or "access_token" not in payload:
-                raise EstfeedAuthError(
-                    f"Token request failed: {resp.status} {payload.get('error', '')}"
-                )
-            return payload["access_token"], now_monotonic + float(payload.get("expires_in", 60))
+            if resp.status in (400, 401, 403):
+                raise EstfeedAuthError(f"Token request failed: {resp.status}")
+            if resp.status == 429:
+                raise EstfeedRateLimitError(f"Token request failed: {resp.status}")
+            if resp.status != 200:
+                raise EstfeedAPIError(f"Token request failed: {resp.status}")
+            try:
+                payload = await resp.json()
+                token = payload["access_token"]
+                expires_in = float(payload.get("expires_in", 60))
+                if not isinstance(token, str) or not token or expires_in <= 0:
+                    raise ValueError("Invalid token or expiry")
+            except (KeyError, TypeError, ValueError, AttributeError) as err:
+                raise EstfeedAPIError("Invalid token response") from err
+            return token, now_monotonic + expires_in
 
 
 class EstfeedError(Exception):

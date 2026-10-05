@@ -227,3 +227,46 @@ async def test_async_get_prices_chunks_long_ranges(session):
         client = EleringNpsClient(session)
         await client.async_get_prices(start, end)
     assert sum(len(v) for v in m.requests.values()) == 3
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [],
+        {"success": False, "data": {"ee": []}},
+        {"data": None},
+        {"data": {"ee": {}}},
+        {"data": {"ee": ["invalid"]}},
+        {"data": {"ee": [{"timestamp": "invalid", "price": 50}]}},
+        {"data": {"ee": [{"timestamp": 1779321600, "price": "invalid"}]}},
+        {"data": {"ee": [{"timestamp": 1779321600, "price": "NaN"}]}},
+    ],
+)
+async def test_invalid_price_data_raises_nps_error_without_caching(session, response):
+    client = EleringNpsClient(session)
+    with aioresponses() as mocked:
+        mocked.get(NPS_URL_RE, payload=response)
+        with pytest.raises(NpsError):
+            await client.async_get_prices(
+                datetime(2026, 5, 21, tzinfo=UTC), datetime(2026, 5, 22, tzinfo=UTC)
+            )
+    assert client.cache_size == 0
+
+
+async def test_non_json_price_response_raises_nps_error(session):
+    with aioresponses() as mocked:
+        mocked.get(NPS_URL_RE, body="<html>Maintenance</html>")
+        with pytest.raises(NpsError):
+            await EleringNpsClient(session).async_get_prices(
+                datetime(2026, 5, 21, tzinfo=UTC), datetime(2026, 5, 22, tzinfo=UTC)
+            )
+
+
+async def test_price_cache_excludes_rows_outside_requested_range(session):
+    start = datetime(2026, 5, 21, tzinfo=UTC)
+    end = start + timedelta(hours=1)
+    with aioresponses() as mocked:
+        mocked.get(NPS_URL_RE, payload=_stub_response({start: 50.0, end: 100.0}))
+        client = EleringNpsClient(session)
+        assert await client.async_get_prices(start, end) == {start: 0.05}
+    assert client.cache_snapshot([end]) == {end.isoformat(): None}

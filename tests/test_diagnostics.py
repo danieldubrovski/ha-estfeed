@@ -91,8 +91,12 @@ async def test_diagnostics_redacts_secrets_and_eic_body(hass):
     ):
         assert await async_setup_entry(hass, entry)
 
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator.last_meter_errors[_meter().eic] = "meter_error"
         diag = await async_get_config_entry_diagnostics(hass, entry)
 
+    assert _meter().eic not in str(diag)
+    assert diag["coordinator"]["last_meter_errors"] == {"...REDACTED-089n": "meter_error"}
     assert diag["entry"]["data"][CONF_CLIENT_SECRET] == "**REDACTED**"
     assert diag["entry"]["data"][CONF_CLIENT_ID] == "**REDACTED**"
     assert diag["meters"][0]["eic"].endswith("089n")

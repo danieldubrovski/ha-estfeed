@@ -40,10 +40,15 @@ async def async_get_config_entry_diagnostics(
             if coordinator.last_exception
             else None,
             "intervals_cached_per_meter": {
-                eic: sum(len(b) for (e, _k), b in coordinator.cache.items() if e == eic)
+                f"...REDACTED-{eic_suffix(eic)}": sum(
+                    len(b) for (e, _k), b in coordinator.cache.items() if e == eic
+                )
                 for eic in {m.eic for m in coordinator.meters}
             },
-            "last_meter_errors": dict(coordinator.last_meter_errors),
+            "last_meter_errors": {
+                f"...REDACTED-{eic_suffix(eic)}": error
+                for eic, error in coordinator.last_meter_errors.items()
+            },
             "baselines": {
                 f"...REDACTED-{eic_suffix(eic)}|{kind.value}": {
                     "reset_at": b.reset_at.isoformat(),

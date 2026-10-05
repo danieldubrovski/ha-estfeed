@@ -10,13 +10,18 @@ from homeassistant.components.recorder.statistics import get_last_statistics
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    ServiceValidationError,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
-from .api import EstfeedClient, EstfeedError
+from .api import EstfeedAuthError, EstfeedClient, EstfeedError
 from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -74,6 +79,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     start = end - timedelta(days=7)
     try:
         meters = await client.list_metering_points(start, end)
+    except EstfeedAuthError as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
     except EstfeedError as err:
         raise ConfigEntryNotReady(str(err)) from err
 
@@ -167,6 +174,16 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
         )
 
 
+def _service_targets(hass: HomeAssistant, entry_id: str | None) -> list[EstfeedCoordinator]:
+    """Resolve loaded entries without widening an invalid explicit target."""
+    entries = hass.data.get(DOMAIN, {})
+    if entry_id is None:
+        return list(entries.values())
+    if entry_id not in entries:
+        raise ServiceValidationError("The selected Estfeed entry is not loaded")
+    return [entries[entry_id]]
+
+
 def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_BACKFILL):
         return
@@ -174,11 +191,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _handle(call: ServiceCall) -> None:
         months = call.data.get("months", 24)
         entry_id = call.data.get("entry_id")
-        targets = (
-            [hass.data[DOMAIN][entry_id]]
-            if entry_id and entry_id in hass.data[DOMAIN]
-            else list(hass.data.get(DOMAIN, {}).values())
-        )
+        targets = _service_targets(hass, entry_id)
         for coord in targets:
             # Pass months explicitly instead of mutating coord.options —
             # an in-memory override would be silently reverted the next
@@ -189,14 +202,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def _set_reset_at(call: ServiceCall) -> None:
         reset_at = call.data["reset_at"]
-        if reset_at.tzinfo is None:
-            reset_at = reset_at.replace(tzinfo=UTC)
+        reset_at = dt_util.as_utc(reset_at)
         entry_id = call.data.get("entry_id")
-        targets = (
-            [hass.data[DOMAIN][entry_id]]
-            if entry_id and entry_id in hass.data[DOMAIN]
-            else list(hass.data.get(DOMAIN, {}).values())
-        )
+        targets = _service_targets(hass, entry_id)
         for coord in targets:
             # Restore both consumption and production baselines so the
             # anchor rewind is symmetric with how baselines are captured.

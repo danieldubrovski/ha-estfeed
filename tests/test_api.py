@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time as time_module
 from datetime import UTC, datetime
 
@@ -358,3 +359,47 @@ async def test_get_metering_data_too_many_eics_raises(client):
             Resolution.HOUR,
             eics=[f"X{i}" for i in range(11)],
         )
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (400, EstfeedAuthError),
+        (401, EstfeedAuthError),
+        (403, EstfeedAuthError),
+        (429, EstfeedRateLimitError),
+        (503, EstfeedAPIError),
+    ],
+)
+async def test_token_error_status_is_handled_before_parsing_body(client, status, error):
+    with aioresponses() as mocked:
+        mocked.post(KEYCLOAK_TOKEN_URL, status=status, body="<html>Error</html>")
+        with pytest.raises(error):
+            await client._ensure_token()
+
+
+@pytest.mark.parametrize(
+    "response", [[], {}, {"access_token": None}, {"access_token": "t", "expires_in": "invalid"}]
+)
+async def test_malformed_token_response_raises_api_error(client, response):
+    with aioresponses() as mocked:
+        mocked.post(KEYCLOAK_TOKEN_URL, payload=response)
+        with pytest.raises(EstfeedAPIError, match="Invalid token response"):
+            await client._ensure_token()
+
+
+@pytest.mark.parametrize("endpoint", ["metering-point-eics", "metering-data"])
+@pytest.mark.parametrize("response", [None, {}, [{"invalid": "data"}], [None]])
+async def test_malformed_meter_response_raises_api_error(client, endpoint, response):
+    with aioresponses() as mocked:
+        mocked.post(KEYCLOAK_TOKEN_URL, payload={"access_token": "t", "expires_in": 300})
+        mocked.get(
+            re.compile(rf"^https://estfeed\.elering\.ee/api/public/v1/{endpoint}(?:\?|$)"),
+            payload=response,
+        )
+        start, end = datetime(2026, 5, 21, tzinfo=UTC), datetime(2026, 5, 22, tzinfo=UTC)
+        with pytest.raises(EstfeedAPIError):
+            if endpoint == "metering-point-eics":
+                await client.list_metering_points(start, end)
+            else:
+                await client.get_metering_data(start, end, Resolution.HOUR)

@@ -24,7 +24,7 @@ from custom_components.estfeed.const import (
     Resolution,
 )
 from custom_components.estfeed.coordinator import CumulativeBaseline, EstfeedCoordinator
-from custom_components.estfeed.statistics import CostStream
+from custom_components.estfeed.statistics import CostStream, compute_statistic_rows
 
 
 def _make_meter(eic: str = "38ZEE-00720089-N") -> MeteringPoint:
@@ -1813,3 +1813,65 @@ async def test_async_rebuild_cost_gas_aborts_on_meter_error(hass):
     with patch("custom_components.estfeed.statistics.async_add_external_statistics") as mock_add:
         await coord.async_rebuild_cost()
     mock_add.assert_not_called()
+
+
+async def test_quarter_hour_updates_preserve_all_quarters_across_ticks(hass):
+    start = datetime(2026, 5, 21, 10, tzinfo=UTC)
+    meter = _make_meter()
+    intervals = [
+        AccountingInterval(start + timedelta(minutes=15 * i), 1.0, 0.0, None, None)
+        for i in range(12)
+    ]
+    published = {}
+
+    async def fetch(window_start, window_end, resolution, eics):  # noqa: ARG001
+        return [
+            MeterData(
+                meter.eic, [i for i in intervals if window_start <= i.period_start < window_end]
+            )
+        ]
+
+    async def latest(stream):
+        rows = published.get(stream.statistic_id, [])
+        return rows[-1]["start"] + timedelta(hours=1) if rows else None
+
+    async def prior(stream):
+        rows = published.get(stream.statistic_id, [])
+        return rows[-1]["sum"] if rows else 0.0
+
+    async def write(hass, stream, data, prior_sum):  # noqa: ARG001
+        rows = compute_statistic_rows(data, stream.kind, prior_sum)
+        published.setdefault(stream.statistic_id, []).extend(rows)
+        return rows[-1]["sum"] if rows else prior_sum
+
+    client = MagicMock()
+    client.get_metering_data = AsyncMock(side_effect=fetch)
+    coordinator = EstfeedCoordinator(
+        hass=hass,
+        client=client,
+        slug="home",
+        options={CONF_RESOLUTION: Resolution.QUARTER_HOUR.value},
+    )
+    coordinator.meters = [meter]
+    with (
+        patch.object(coordinator, "_latest_seen_for_stream", side_effect=latest),
+        patch.object(coordinator, "_prior_sum_for_stream", side_effect=prior),
+        patch(
+            "custom_components.estfeed.coordinator.async_write_meter_statistics", side_effect=write
+        ),
+    ):
+        await coordinator._fetch_window(
+            start + timedelta(minutes=37),
+            start + timedelta(hours=2, minutes=47),
+            write_stats=True,
+            force_start=False,
+        )
+        consumption_id = coordinator.streams_for(meter)[0].statistic_id
+        assert [row["sum"] for row in published[consumption_id]] == [4.0, 8.0]
+        await coordinator._fetch_window(
+            start,
+            start + timedelta(hours=3),
+            write_stats=True,
+            force_start=False,
+        )
+    assert [row["sum"] for row in published[consumption_id]] == [4.0, 8.0, 12.0]
